@@ -2,8 +2,10 @@
 
 Reports distinct IP addresses that received a 200 response, with the pages
 each accessed, and distinct IP addresses that were denied access (any 4xx
-status), with the pages each attempted. Displayed allowed IPs are annotated
-with their reverse-DNS hostname.
+status), with the pages each attempted. Every line is prefixed with the
+timestamp of the relevant access (the most recent one, if a page was hit
+more than once). Displayed allowed IPs are annotated with their reverse-DNS
+hostname.
 
 Usage: uv run main.py [--no-denied] [--no-bots] [--no-color] [logfile]
 """
@@ -16,6 +18,7 @@ import socket
 import subprocess
 import tempfile
 from collections import defaultdict
+from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -27,6 +30,11 @@ LOG_LINE = re.compile(
 
 REQUEST = re.compile(r"^[A-Z]+ (?P<page>\S+) HTTP/[\d.]+$")
 
+TIME_FORMAT = "%d/%b/%Y:%H:%M:%S %z"
+
+# page -> time of the most recent access, keyed by IP
+AccessTable = dict[str, dict[str, datetime]]
+
 
 def page_from_request(request: str) -> str:
     """Extract the requested path; fall back to the raw request if malformed."""
@@ -36,9 +44,9 @@ def page_from_request(request: str) -> str:
     return f"<malformed: {request}>" if request else "<empty request>"
 
 
-def analyze(log_path: Path) -> tuple[dict[str, set[str]], dict[str, set[str]], int]:
-    granted: dict[str, set[str]] = defaultdict(set)
-    denied: dict[str, set[str]] = defaultdict(set)
+def analyze(log_path: Path) -> tuple[AccessTable, AccessTable, int]:
+    granted: AccessTable = defaultdict(dict)
+    denied: AccessTable = defaultdict(dict)
     unparsed = 0
 
     with log_path.open(encoding="utf-8", errors="replace") as f:
@@ -48,13 +56,23 @@ def analyze(log_path: Path) -> tuple[dict[str, set[str]], dict[str, set[str]], i
                 if line.strip():
                     unparsed += 1
                 continue
+            try:
+                when = datetime.strptime(match.group("time"), TIME_FORMAT)
+            except ValueError:
+                unparsed += 1
+                continue
             ip = match.group("ip")
             status = int(match.group("status"))
             page = page_from_request(match.group("request"))
             if status == 200:
-                granted[ip].add(page)
+                table = granted
             elif 400 <= status <= 499:
-                denied[ip].add(page)
+                table = denied
+            else:
+                continue
+            prev = table[ip].get(page)
+            if prev is None or when > prev:
+                table[ip][page] = when
 
     return granted, denied, unparsed
 
@@ -120,19 +138,20 @@ RESET = "\033[0m"
 
 def print_section(
     title: str,
-    table: dict[str, set[str]],
+    table: AccessTable,
     hostnames: dict[str, str] | None = None,
     color: bool = True,
 ) -> None:
     red, reset = (RED, RESET) if color else ("", "")
     print(f"=== {title} — {len(table)} distinct IPs ===")
     for ip in sorted(table, key=ip_sort_key):
-        pages = sorted(table[ip])
+        pages = table[ip]
         label = "page" if len(pages) == 1 else "pages"
         host = f" [{hostnames[ip]}]" if hostnames else ""
-        print(f"{red}{ip}{host}  ({len(pages)} {label}){reset}")
-        for page in pages:
-            print(f"    {page}")
+        latest = max(pages.values()).strftime(TIME_FORMAT)
+        print(f"{red}[{latest}] {ip}{host}  ({len(pages)} {label}){reset}")
+        for page in sorted(pages):
+            print(f"    [{pages[page].strftime(TIME_FORMAT)}] {page}")
         print()
 
 
