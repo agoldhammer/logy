@@ -7,7 +7,7 @@ timestamp of the relevant access (the most recent one, if a page was hit
 more than once). Displayed allowed IPs are annotated with their reverse-DNS
 hostname.
 
-Usage: uv run main.py [--no-denied] [--no-bots] [--no-color] [logfile]
+Usage: uv run main.py [--no-denied] [--no-bots] [--time-sort] [--no-color] [logfile]
 """
 
 import argparse
@@ -141,10 +141,15 @@ def print_section(
     table: AccessTable,
     hostnames: dict[str, str] | None = None,
     color: bool = True,
+    time_sort: bool = False,
 ) -> None:
     red, reset = (RED, RESET) if color else ("", "")
     print(f"=== {title} — {len(table)} distinct IPs ===")
-    for ip in sorted(table, key=ip_sort_key):
+    if time_sort:
+        order = sorted(table, key=lambda ip: max(table[ip].values()))
+    else:
+        order = sorted(table, key=ip_sort_key)
+    for ip in order:
         pages = table[ip]
         label = "page" if len(pages) == 1 else "pages"
         host = f" [{hostnames[ip]}]" if hostnames else ""
@@ -169,6 +174,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "-b", "--no-bots", action="store_true",
         help="suppress allowed IPs that only accessed /, /robots.txt, or /.well-known/*",
+    )
+    parser.add_argument(
+        "-t", "--time-sort", action="store_true",
+        help="order each section by the latest access time per IP "
+        "(oldest first) instead of by IP address",
     )
     parser.add_argument(
         "--no-color", action="store_true",
@@ -206,9 +216,13 @@ def main() -> None:
 
     color = not args.no_color
     hostnames = reverse_dns(list(granted))
-    print_section("IPs granted access (200)", granted, hostnames, color)
+    print_section(
+        "IPs granted access (200)", granted, hostnames, color, args.time_sort
+    )
     if not args.no_denied:
-        print_section("IPs denied access (4xx)", denied, color=color)
+        print_section(
+            "IPs denied access (4xx)", denied, color=color, time_sort=args.time_sort
+        )
     if unparsed:
         print(f"note: {unparsed} line(s) could not be parsed and were skipped")
 
