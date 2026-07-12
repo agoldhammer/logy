@@ -5,7 +5,7 @@ each accessed, and distinct IP addresses that were denied access (any 4xx
 status), with the pages each attempted. Displayed allowed IPs are annotated
 with their reverse-DNS hostname.
 
-Usage: uv run main.py [--no-denied] [--no-root-only] [logfile]
+Usage: uv run main.py [--no-denied] [--no-bots] [--no-color] [logfile]
 """
 
 import argparse
@@ -67,6 +67,11 @@ def reverse_dns(ips: list[str]) -> dict[str, str]:
         return dict(zip(ips, pool.map(lookup, ips)))
 
 
+def is_bot_page(page: str) -> bool:
+    """Pages whose access suggests an automated crawler rather than a visitor."""
+    return page == "/" or page == "/robots.txt" or page.startswith("/.well-known/")
+
+
 def ip_sort_key(ip: str):
     try:
         return (0, int(ipaddress.ip_address(ip)))
@@ -104,12 +109,12 @@ def parse_args() -> argparse.Namespace:
         help=f"nginx access log to analyze (default: {default_log})",
     )
     parser.add_argument(
-        "--no-denied", action="store_true",
+        "-d", "--no-denied", action="store_true",
         help="suppress the denied-access (4xx) section",
     )
     parser.add_argument(
-        "--no-root-only", action="store_true",
-        help="suppress allowed IPs whose only accessed page is /",
+        "-b", "--no-bots", action="store_true",
+        help="suppress allowed IPs that only accessed /, /robots.txt, or /.well-known/*",
     )
     parser.add_argument(
         "--no-color", action="store_true",
@@ -125,8 +130,12 @@ def main() -> None:
 
     granted, denied, unparsed = analyze(args.logfile)
 
-    if args.no_root_only:
-        granted = {ip: pages for ip, pages in granted.items() if pages != {"/"}}
+    if args.no_bots:
+        granted = {
+            ip: pages
+            for ip, pages in granted.items()
+            if not all(is_bot_page(page) for page in pages)
+        }
 
     color = not args.no_color
     hostnames = reverse_dns(list(granted))
