@@ -9,12 +9,17 @@ Usage: uv run main.py [--no-denied] [--no-bots] [--no-color] [logfile]
 """
 
 import argparse
+import fnmatch
 import ipaddress
 import re
 import socket
+import subprocess
+import tempfile
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+
+REMOTE_LOG = "/var/log/nginx/access.log"
 
 LOG_LINE = re.compile(
     r'^(?P<ip>\S+) \S+ \S+ \[(?P<time>[^\]]+)\] "(?P<request>[^"]*)" (?P<status>\d{3}) \S+'
@@ -65,6 +70,36 @@ def reverse_dns(ips: list[str]) -> dict[str, str]:
 
     with ThreadPoolExecutor(max_workers=min(32, len(ips) or 1)) as pool:
         return dict(zip(ips, pool.map(lookup, ips)))
+
+
+def host_in_ssh_config(host: str) -> bool:
+    """True if host matches a Host entry in ~/.ssh/config (catch-alls excluded)."""
+    config = Path.home() / ".ssh" / "config"
+    if not config.is_file():
+        return False
+    for line in config.read_text().splitlines():
+        line = line.strip()
+        if not line.lower().startswith("host ") and not line.lower().startswith("host\t"):
+            continue
+        for pattern in line.split()[1:]:
+            if pattern.startswith("!") or set(pattern) <= {"*", "?"}:
+                continue
+            if fnmatch.fnmatch(host, pattern):
+                return True
+    return False
+
+
+def fetch_remote_log(host: str) -> Path:
+    """Copy the nginx access log from the remote host to a temp file via scp."""
+    tmp = tempfile.NamedTemporaryFile(
+        prefix=f"{host}-access-", suffix=".log", delete=False
+    )
+    tmp.close()
+    result = subprocess.run(["scp", "-q", f"{host}:{REMOTE_LOG}", tmp.name])
+    if result.returncode != 0:
+        Path(tmp.name).unlink(missing_ok=True)
+        raise SystemExit(f"error: scp failed to fetch {host}:{REMOTE_LOG}")
+    return Path(tmp.name)
 
 
 def is_bot_page(page: str) -> bool:
@@ -120,15 +155,28 @@ def parse_args() -> argparse.Namespace:
         "--no-color", action="store_true",
         help="disable colored output",
     )
+    parser.add_argument(
+        "-r", "--remote", metavar="HOST",
+        help=f"fetch {REMOTE_LOG} via scp from a host defined in ~/.ssh/config "
+        "(overrides logfile)",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    if not args.logfile.is_file():
-        raise SystemExit(f"error: log file not found: {args.logfile}")
+    if args.remote:
+        if not host_in_ssh_config(args.remote):
+            raise SystemExit(
+                f"error: host '{args.remote}' not found in ~/.ssh/config"
+            )
+        logfile = fetch_remote_log(args.remote)
+    else:
+        logfile = args.logfile
+    if not logfile.is_file():
+        raise SystemExit(f"error: log file not found: {logfile}")
 
-    granted, denied, unparsed = analyze(args.logfile)
+    granted, denied, unparsed = analyze(logfile)
 
     if args.no_bots:
         granted = {
