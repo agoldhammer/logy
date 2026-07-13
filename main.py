@@ -17,7 +17,9 @@ import re
 import socket
 import subprocess
 import tempfile
+import threading
 from collections import defaultdict
+from contextlib import contextmanager
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -120,6 +122,29 @@ def fetch_remote_log(host: str) -> Path:
     return Path(tmp.name)
 
 
+@contextmanager
+def progress_dots(interval: float = 2.0):
+    """Print a dot every `interval` seconds until the with-block exits."""
+    stop = threading.Event()
+    dotted = False
+
+    def tick() -> None:
+        nonlocal dotted
+        while not stop.wait(interval):
+            print(".", end="", flush=True)
+            dotted = True
+
+    thread = threading.Thread(target=tick, daemon=True)
+    thread.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        thread.join()
+        if dotted:
+            print(flush=True)
+
+
 def is_bot_page(page: str) -> bool:
     """Pages whose access suggests an automated crawler rather than a visitor."""
     return page == "/" or page == "/robots.txt" or page.startswith("/.well-known/")
@@ -199,23 +224,27 @@ def main() -> None:
             raise SystemExit(
                 f"error: host '{args.remote}' not found in ~/.ssh/config"
             )
+        print(f"logy: analyzing remote log {args.remote}:{REMOTE_LOG}", flush=True)
         logfile = fetch_remote_log(args.remote)
     else:
         logfile = args.logfile
+        print(f"logy: analyzing local log {logfile}", flush=True)
     if not logfile.is_file():
         raise SystemExit(f"error: log file not found: {logfile}")
 
-    granted, denied, unparsed = analyze(logfile)
+    with progress_dots():
+        granted, denied, unparsed = analyze(logfile)
 
-    if args.no_bots:
-        granted = {
-            ip: pages
-            for ip, pages in granted.items()
-            if not all(is_bot_page(page) for page in pages)
-        }
+        if args.no_bots:
+            granted = {
+                ip: pages
+                for ip, pages in granted.items()
+                if not all(is_bot_page(page) for page in pages)
+            }
+
+        hostnames = reverse_dns(list(granted))
 
     color = not args.no_color
-    hostnames = reverse_dns(list(granted))
     print_section(
         "IPs granted access (200)", granted, hostnames, color, args.time_sort
     )
