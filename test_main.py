@@ -34,7 +34,7 @@ class AnalyzeTests(unittest.TestCase):
             log.write_text(text)
             return main.analyze(log)
 
-    def test_classifies_accesses_and_keeps_most_recent_page_hit(self) -> None:
+    def test_classifies_accesses_and_records_every_page_hit(self) -> None:
         granted, denied, unparsed = self.analyze_text(
             '192.0.2.1 - - [01/Jan/2025:10:00:00 +0000] "GET /old HTTP/1.1" 200 10\n'
             '192.0.2.1 - - [02/Jan/2025:10:00:00 +0000] "GET /old HTTP/1.1" 200 10\n'
@@ -47,7 +47,10 @@ class AnalyzeTests(unittest.TestCase):
         self.assertEqual(set(denied), {"2001:db8::1"})
         self.assertEqual(
             granted["192.0.2.1"]["/old"],
-            datetime.strptime("02/Jan/2025:10:00:00 +0000", main.TIME_FORMAT),
+            [
+                datetime.strptime("01/Jan/2025:10:00:00 +0000", main.TIME_FORMAT),
+                datetime.strptime("02/Jan/2025:10:00:00 +0000", main.TIME_FORMAT),
+            ],
         )
         self.assertIn("/private", denied["2001:db8::1"])
 
@@ -104,12 +107,20 @@ class HelperTests(unittest.TestCase):
         self.assertFalse(main.is_bot_page("/articles"))
         self.assertLess(main.ip_sort_key("10.0.0.1"), main.ip_sort_key("not-an-ip"))
 
+    def test_latest_access_spans_all_pages_and_hits(self) -> None:
+        pages = {
+            "/a": [datetime(2025, 1, 1), datetime(2025, 1, 4)],
+            "/b": [datetime(2025, 1, 3)],
+        }
+        self.assertEqual(main.latest_access(pages), datetime(2025, 1, 4))
+
 
 class PrintAndCliTests(unittest.TestCase):
     def test_print_section_sorts_ips_and_uses_singular_page_label(self) -> None:
+        zone = datetime.now().astimezone().tzinfo
         table = {
-            "10.0.0.2": {"/b": datetime(2025, 1, 2, tzinfo=datetime.now().astimezone().tzinfo)},
-            "10.0.0.1": {"/a": datetime(2025, 1, 1, tzinfo=datetime.now().astimezone().tzinfo)},
+            "10.0.0.2": {"/b": [datetime(2025, 1, 2, tzinfo=zone)]},
+            "10.0.0.1": {"/a": [datetime(2025, 1, 1, tzinfo=zone)]},
         }
         output = io.StringIO()
         with redirect_stdout(output):
@@ -122,8 +133,31 @@ class PrintAndCliTests(unittest.TestCase):
 
         text = output.getvalue()
         self.assertLess(text.index("10.0.0.1"), text.index("10.0.0.2"))
-        self.assertIn("[one]  (1 page)", text)
+        self.assertIn("10.0.0.1 [one]  (1 page, 1 access)", text)
         self.assertNotIn("\033[", text)
+
+    def test_print_section_lists_every_access_to_a_repeated_page(self) -> None:
+        zone = datetime.now().astimezone().tzinfo
+        table = {
+            "10.0.0.1": {
+                "/a": [
+                    datetime(2025, 1, 3, tzinfo=zone),
+                    datetime(2025, 1, 1, tzinfo=zone),
+                ],
+                "/b": [datetime(2025, 1, 2, tzinfo=zone)],
+            }
+        }
+        output = io.StringIO()
+        with redirect_stdout(output):
+            main.print_section("Test", table, color=False)
+
+        self.assertIn("10.0.0.1  (2 pages, 3 accesses)", output.getvalue())
+        lines = [line for line in output.getvalue().splitlines() if line.startswith("    ")]
+        self.assertEqual(
+            [line.split("] ")[1] for line in lines], ["/a", "/a", "/b"]
+        )
+        self.assertIn("01/Jan", lines[0])
+        self.assertIn("03/Jan", lines[1])
 
     def test_parse_args_reads_flags_and_logfile(self) -> None:
         with patch.object(sys, "argv", ["main.py", "--no-denied", "--time-sort", "example.log"]):
@@ -134,10 +168,10 @@ class PrintAndCliTests(unittest.TestCase):
 
     def test_main_filters_bot_only_ips_and_honors_no_denied(self) -> None:
         granted = {
-            "192.0.2.1": {"/": datetime.now().astimezone()},
-            "192.0.2.2": {"/real": datetime.now().astimezone()},
+            "192.0.2.1": {"/": [datetime.now().astimezone()]},
+            "192.0.2.2": {"/real": [datetime.now().astimezone()]},
         }
-        denied = {"192.0.2.3": {"/private": datetime.now().astimezone()}}
+        denied = {"192.0.2.3": {"/private": [datetime.now().astimezone()]}}
         args = MagicMock(
             remote=None,
             logfile=Path("example.log"),

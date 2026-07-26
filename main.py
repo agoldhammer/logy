@@ -2,10 +2,9 @@
 
 Reports distinct IP addresses that received a 200 response, with the pages
 each accessed, and distinct IP addresses that were denied access (any 4xx
-status), with the pages each attempted. Every line is prefixed with the
-timestamp of the relevant access (the most recent one, if a page was hit
-more than once). Displayed allowed IPs are annotated with their reverse-DNS
-hostname.
+status), with the pages each attempted. Every access is listed, prefixed
+with its timestamp; a page hit more than once appears once per hit.
+Displayed allowed IPs are annotated with their reverse-DNS hostname.
 
 Usage: uv run main.py [--no-denied] [--no-bots] [--time-sort] [--no-color] [logfile]
 """
@@ -34,8 +33,8 @@ REQUEST = re.compile(r"^[A-Z]+ (?P<page>\S+) HTTP/[\d.]+$")
 
 TIME_FORMAT = "%d/%b/%Y:%H:%M:%S %z"
 
-# page -> time of the most recent access, keyed by IP
-AccessTable = dict[str, dict[str, datetime]]
+# page -> times of every access to it, keyed by IP
+AccessTable = dict[str, dict[str, list[datetime]]]
 
 
 def page_from_request(request: str) -> str:
@@ -47,8 +46,8 @@ def page_from_request(request: str) -> str:
 
 
 def analyze(log_path: Path) -> tuple[AccessTable, AccessTable, int]:
-    granted: AccessTable = defaultdict(dict)
-    denied: AccessTable = defaultdict(dict)
+    granted: AccessTable = defaultdict(lambda: defaultdict(list))
+    denied: AccessTable = defaultdict(lambda: defaultdict(list))
     unparsed = 0
 
     with log_path.open(encoding="utf-8", errors="replace") as f:
@@ -72,9 +71,7 @@ def analyze(log_path: Path) -> tuple[AccessTable, AccessTable, int]:
                 table = denied
             else:
                 continue
-            prev = table[ip].get(page)
-            if prev is None or when > prev:
-                table[ip][page] = when
+            table[ip][page].append(when)
 
     return granted, denied, unparsed
 
@@ -150,6 +147,11 @@ def is_bot_page(page: str) -> bool:
     return page == "/" or page == "/robots.txt" or page.startswith("/.well-known/")
 
 
+def latest_access(pages: dict[str, list[datetime]]) -> datetime:
+    """The most recent access time across every page an IP touched."""
+    return max(when for times in pages.values() for when in times)
+
+
 def ip_sort_key(ip: str):
     try:
         return (0, int(ipaddress.ip_address(ip)))
@@ -171,17 +173,22 @@ def print_section(
     red, reset = (RED, RESET) if color else ("", "")
     print(f"=== {title} — {len(table)} distinct IPs ===")
     if time_sort:
-        order = sorted(table, key=lambda ip: max(table[ip].values()))
+        order = sorted(table, key=lambda ip: latest_access(table[ip]))
     else:
         order = sorted(table, key=ip_sort_key)
     for ip in order:
         pages = table[ip]
-        label = "page" if len(pages) == 1 else "pages"
+        hits = sum(len(times) for times in pages.values())
+        page_label = "page" if len(pages) == 1 else "pages"
+        hit_label = "access" if hits == 1 else "accesses"
         host = f" [{hostnames[ip]}]" if hostnames else ""
-        latest = max(pages.values()).strftime(TIME_FORMAT)
-        print(f"{red}[{latest}] {ip}{host}  ({len(pages)} {label}){reset}")
+        print(
+            f"{red}{ip}{host}  "
+            f"({len(pages)} {page_label}, {hits} {hit_label}){reset}"
+        )
         for page in sorted(pages):
-            print(f"    [{pages[page].strftime(TIME_FORMAT)}] {page}")
+            for when in sorted(pages[page]):
+                print(f"    [{when.strftime(TIME_FORMAT)}] {page}")
         print()
 
 
