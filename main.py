@@ -269,7 +269,9 @@ def main() -> None:
             "IPs denied access (4xx)", denied, color=color, time_sort=args.time_sort
         )
     if unparsed:
-        print(f"note: {unparsed} line(s) could not be parsed and were skipped")
+        line_label = "line" if unparsed == 1 else "lines"
+        verb = "was" if unparsed == 1 else "were"
+        print(f"note: {unparsed} {line_label} could not be parsed and {verb} skipped")
 
 
 if __name__ == "__main__":
