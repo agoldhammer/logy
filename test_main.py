@@ -26,6 +26,14 @@ class PageFromRequestTests(unittest.TestCase):
             "<malformed: not an HTTP request>",
         )
 
+    def test_truncates_an_overlong_malformed_request(self) -> None:
+        page = main.page_from_request("x" * (main.MAX_REQUEST_CHARS + 10))
+        self.assertEqual(page, f"<malformed: {'x' * main.MAX_REQUEST_CHARS}...>")
+
+    def test_keeps_a_malformed_request_at_the_length_limit_intact(self) -> None:
+        request = "y" * main.MAX_REQUEST_CHARS
+        self.assertEqual(main.page_from_request(request), f"<malformed: {request}>")
+
 
 class AnalyzeTests(unittest.TestCase):
     def analyze_text(self, text: str):
@@ -135,6 +143,13 @@ class PrintAndCliTests(unittest.TestCase):
         self.assertLess(text.index("10.0.0.1"), text.index("10.0.0.2"))
         self.assertIn("10.0.0.1 [one]  (1 page, 1 access)", text)
         self.assertNotIn("\033[", text)
+
+    def test_print_section_singularizes_a_lone_ip_in_the_title(self) -> None:
+        table = {"10.0.0.1": {"/a": [datetime.now().astimezone()]}}
+        output = io.StringIO()
+        with redirect_stdout(output):
+            main.print_section("Test", table, color=False)
+        self.assertIn("=== Test — 1 distinct IP ===", output.getvalue())
 
     def test_print_section_lists_every_access_to_a_repeated_page(self) -> None:
         zone = datetime.now().astimezone().tzinfo

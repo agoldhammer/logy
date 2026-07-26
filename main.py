@@ -33,6 +33,10 @@ REQUEST = re.compile(r"^[A-Z]+ (?P<page>\S+) HTTP/[\d.]+$")
 
 TIME_FORMAT = "%d/%b/%Y:%H:%M:%S %z"
 
+# Malformed requests are often raw TLS/RDP handshake bytes, escaped by nginx
+# into hundreds of characters; show only this much of one.
+MAX_REQUEST_CHARS = 60
+
 # page -> times of every access to it, keyed by IP
 AccessTable = dict[str, dict[str, list[datetime]]]
 
@@ -42,7 +46,11 @@ def page_from_request(request: str) -> str:
     match = REQUEST.match(request)
     if match:
         return match.group("page")
-    return f"<malformed: {request}>" if request else "<empty request>"
+    if not request:
+        return "<empty request>"
+    if len(request) > MAX_REQUEST_CHARS:
+        request = request[:MAX_REQUEST_CHARS] + "..."
+    return f"<malformed: {request}>"
 
 
 def analyze(log_path: Path) -> tuple[AccessTable, AccessTable, int]:
@@ -171,7 +179,8 @@ def print_section(
     time_sort: bool = False,
 ) -> None:
     red, reset = (RED, RESET) if color else ("", "")
-    print(f"=== {title} — {len(table)} distinct IPs ===")
+    ip_label = "IP" if len(table) == 1 else "IPs"
+    print(f"=== {title} — {len(table)} distinct {ip_label} ===")
     if time_sort:
         order = sorted(table, key=lambda ip: latest_access(table[ip]))
     else:
